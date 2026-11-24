@@ -1,0 +1,35 @@
+# Web API
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+
+# Configuration and validation
+pydantic==2.11.4
+pydantic-settings==2.9.1
+python-dotenv==1.1.0
+
+# LangGraph and LangChain
+langgraph==0.4.5
+langgraph-checkpoint-sqlite==2.0.10
+langchain==0.3.25
+langchain-core==0.3.59
+langchain-google-genai==2.1.4
+langsmith==0.3.42
+
+# MCP tools
+fastmcp==2.3.4
+
+# Vector retrieval
+qdrant-client==1.14.2
+langchain-qdrant==0.2.0
+
+# ERP and local persistence
+SQLAlchemy==2.0.41
+aiosqlite==0.21.0
+
+# HTTP client
+httpx==0.28.1
+
+# Tests
+pytest==8.3.5
+pytest-asyncio==0.26.0
