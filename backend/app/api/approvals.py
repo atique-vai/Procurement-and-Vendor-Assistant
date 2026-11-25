@@ -1,5 +1,7 @@
 """Endpoints for listing and resolving human approval interrupts."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Protocol, cast
 
@@ -15,12 +17,15 @@ from app.schemas.api_models import (
 
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
+logger = logging.getLogger(__name__)
+_APPROVAL_TIMEOUT_SECONDS = 120
 
 _APPROVAL_DETAIL_KEYS = (
     "approval",
     "approval_request",
     "purchase_order",
     "po_draft",
+    "draft_po",
     "request",
 )
 _APPROVAL_STATUSES = {
@@ -111,12 +116,23 @@ def _is_pending_approval(snapshot: ApprovalSnapshot) -> bool:
     return False
 
 
-def _approval_details(values: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+def _approval_details(
+    values: Mapping[str, Any],
+    snapshot: ApprovalSnapshot | None = None,
+) -> dict[str, Any]:
+    details = {
         key: values[key]
         for key in _APPROVAL_DETAIL_KEYS
-        if key in values
+        if key in values and values[key] is not None
     }
+    if snapshot is not None and "approval_request" not in details:
+        for task in snapshot.tasks:
+            for interrupt in getattr(task, "interrupts", ()):
+                interrupt_value = getattr(interrupt, "value", None)
+                if isinstance(interrupt_value, Mapping):
+                    details["approval_request"] = dict(interrupt_value)
+                    return details
+    return details
 
 
 @router.get(
@@ -137,7 +153,7 @@ async def list_pending_approvals(
             detail="The procurement workflow has no checkpoint store.",
         )
 
-    pending: list[ApprovalItem] = []
+    thread_configs: list[tuple[str, Any]] = []
     seen_thread_ids: set[str] = set()
     async for checkpoint in checkpointer.alist(None, limit=limit * 10):
         config = getattr(checkpoint, "config", None)
@@ -145,7 +161,10 @@ async def list_pending_approvals(
         if thread_id is None or thread_id in seen_thread_ids:
             continue
         seen_thread_ids.add(thread_id)
+        thread_configs.append((thread_id, config))
 
+    pending: list[ApprovalItem] = []
+    for thread_id, config in thread_configs:
         snapshot = await graph.aget_state(config)
         if not _is_pending_approval(snapshot):
             continue
@@ -157,7 +176,7 @@ async def list_pending_approvals(
                 status=str(values.get("approval_status", "pending")),
                 next=list(snapshot.next),
                 created_at=snapshot.created_at,
-                details=jsonable_encoder(_approval_details(values)),
+                details=jsonable_encoder(_approval_details(values, snapshot)),
             )
         )
         if len(pending) >= limit:
@@ -204,7 +223,29 @@ async def resolve_approval(
     if decision.approver_name is not None:
         resume_value["approver_name"] = decision.approver_name
 
-    result = await graph.ainvoke(Command(resume=resume_value), config=config)
+    try:
+        result = await asyncio.wait_for(
+            graph.ainvoke(Command(resume=resume_value), config=config),
+            timeout=_APPROVAL_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        logger.error("Approval resume timed out for thread %s", thread_id)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Resolving the approval timed out. Please try again.",
+        ) from exc
+    except (RuntimeError, ValueError, TypeError) as exc:
+        logger.exception("Approval resume failed for thread %s", thread_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The procurement workflow could not resume after the decision. Check backend logs.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected approval resume failure for thread %s", thread_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The procurement workflow or an external AI service is unavailable. Please try again.",
+        ) from exc
     return ApprovalDecisionResult(
         thread_id=thread_id,
         decision=decision.decision,

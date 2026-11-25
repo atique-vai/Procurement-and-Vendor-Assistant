@@ -65,3 +65,24 @@ async def test_output_guardrail_redacts_sensitive_values() -> None:
     assert "123-45-6789" not in scrubbed
     assert "123456789" not in scrubbed
     assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in scrubbed
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_clears_approval_decision_after_receipt() -> None:
+    result = await output_guardrail_node(
+        {
+            "approval_decision": "approved",
+            "final_po_id": "PO-2026-1234",
+            "draft_po": {
+                "po_id": "PO-2026-1234",
+                "cost_center_id": "CC-ENG-402",
+                "total_amount": 1000.0,
+            },
+            "messages": [AIMessage(content="Drafted.")],
+        }
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["approval_decision"] is None
+    assert result["requires_approval"] is False
+    assert "PO-2026-1234" in result["messages"][0].content

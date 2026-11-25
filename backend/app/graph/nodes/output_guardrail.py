@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import sqlite3
@@ -55,9 +56,10 @@ def _commit_final_po_to_erp(
     if not items or total_amount <= 0:
         return None
 
-    thread_id = state.get("thread_id", "unknown-thread")
-    po_id = draft_po.get("po_id") or f"PO-2026-{abs(hash(thread_id)) % 900 + 100}"
-    cost_center_id = draft_po.get("cost_center_id", "CC-ENG-402")
+    thread_id = state.get("thread_id") or "unknown-thread"
+    digest = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:8].upper()
+    po_id = draft_po.get("po_id") or f"PO-2026-{digest}"
+    cost_center_id = draft_po.get("cost_center_id") or "CC-ENG-402"
     approver_id = state.get("approver_id") or "AUTO-POLICY-SEC-2.1"
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -187,15 +189,15 @@ async def output_guardrail_node(state: ProcurementGraphState) -> Dict[str, Any]:
             latest_text = str(raw)
 
     # If resuming directly from Manager HITL approval, generate the final PO receipt message
-    if approval_decision == "approved" and final_po_id:
-        approver_name = state.get("approver_name", "Tanvir Ahmed")
+    if approval_decision == "approved" and final_po_id and draft_po:
+        approver_name = state.get("approver_name") or "Tanvir Ahmed"
         notes = state.get("manager_notes", "")
         note_line = f"\n* **Manager Notes:** {notes}" if notes else ""
 
         receipt_msg = (
             f"**Purchase Order `{final_po_id}` Approved & Committed!**\n\n"
             f"* **Approved By:** {approver_name}\n"
-            f"* **Cost Center:** `{draft_po.get('cost_center_id', 'CC-ENG-402')}`\n"
+            f"* **Cost Center:** `{draft_po.get('cost_center_id') or 'CC-ENG-402'}`\n"
             f"* **Total Committed Amount:** **${float(draft_po.get('total_amount', 0)):,.2f}**"
             f"{note_line}\n\n"
             "The requisition has been dispatched to the ERP ledger and deducted from your Q4 department budget."
@@ -204,6 +206,8 @@ async def output_guardrail_node(state: ProcurementGraphState) -> Dict[str, Any]:
         return {
             "draft_po": draft_po,
             "final_po_id": final_po_id,
+            "approval_decision": None,
+            "requires_approval": False,
             "status": "COMPLETED",
             "messages": [AIMessage(content=scrubbed_reply)],
             "visited_nodes": ["output_guardrail"],
@@ -218,6 +222,8 @@ async def output_guardrail_node(state: ProcurementGraphState) -> Dict[str, Any]:
     return {
         "draft_po": draft_po if draft_po else None,
         "final_po_id": final_po_id,
+        "approval_decision": None,
+        "requires_approval": False,
         "status": "COMPLETED",
         "messages": updated_messages,
         "visited_nodes": ["output_guardrail"],

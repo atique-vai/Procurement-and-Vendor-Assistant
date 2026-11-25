@@ -28,3 +28,26 @@ def test_chat_times_out_when_workflow_does_not_respond(
     assert response.json()["detail"] == (
         "The procurement workflow timed out. Please try again."
     )
+
+
+def test_chat_passes_thread_id_into_workflow_input_state() -> None:
+    captured_inputs: list[dict[str, object]] = []
+
+    class CapturingGraph:
+        async def ainvoke(
+            self, input: dict[str, object], config: dict[str, object]
+        ) -> dict[str, object]:
+            captured_inputs.append(input)
+            return {"response": "OK", "citations": [], "draft_po": None}
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.procurement_graph = CapturingGraph()
+
+    response = TestClient(app).post(
+        "/chat",
+        json={"message": "Find a vendor", "thread_id": "thread-xyz"},
+    )
+
+    assert response.status_code == 200
+    assert captured_inputs[0]["thread_id"] == "thread-xyz"

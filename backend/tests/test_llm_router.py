@@ -102,3 +102,70 @@ def test_chat_model_requires_google_api_key(monkeypatch: pytest.MonkeyPatch) -> 
 
     with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
         get_chat_model()
+
+
+def test_structured_model_forces_tool_choice_for_gemini_3_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import AIMessage
+
+    class ResponseSchema(BaseModel):
+        response: str
+
+    class ToolAwareChatModel:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self._supports_tool_choice = False
+            self.bound_tool_choice: str | None = None
+
+        def bind_tools(
+            self,
+            tools: list[type[BaseModel]],
+            *,
+            tool_choice: str | None = None,
+        ) -> object:
+            from langchain_core.runnables import RunnableLambda
+
+            self.bound_tool_choice = tool_choice
+            assert tools == [ResponseSchema]
+            return RunnableLambda(
+                lambda _: AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ResponseSchema",
+                            "args": {"response": "Structured reply"},
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            )
+
+        def with_structured_output(self, schema: type[BaseModel]) -> object:
+            raise AssertionError("should use bind_tools with explicit tool_choice")
+
+    created: list[ToolAwareChatModel] = []
+
+    def _factory(**kwargs: object) -> ToolAwareChatModel:
+        instance = ToolAwareChatModel(**kwargs)
+        created.append(instance)
+        return instance
+
+    monkeypatch.setattr(llm_router, "ChatGoogleGenerativeAI", _factory)
+    monkeypatch.setattr(
+        llm_router,
+        "get_settings",
+        lambda: SimpleNamespace(
+            google_api_key="test-key",
+            primary_model="gemini-3.5-flash-lite",
+            fallback_model="",
+        ),
+    )
+
+    model = get_structured_chat_model(ResponseSchema)
+    result = model.invoke("hi")
+
+    assert created[0].bound_tool_choice == "ResponseSchema"
+    assert isinstance(result, ResponseSchema)
+    assert result.response == "Structured reply"

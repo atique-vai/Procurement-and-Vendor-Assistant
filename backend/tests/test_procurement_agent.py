@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.graph.nodes import procurement_agent
 
@@ -141,3 +141,51 @@ async def test_procurement_agent_rejects_order_not_in_approved_catalog(
     assert result["draft_po"] is None
     assert "verified against the approved procurement catalog" in result["messages"][0].content
     assert result["requires_approval"] is False
+
+
+@pytest.mark.asyncio
+async def test_procurement_agent_normalizes_rejection_system_messages_and_preserves_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_messages: list[object] = []
+
+    class CapturingModel:
+        async def ainvoke(
+            self, messages: list[object]
+        ) -> procurement_agent.ProcurementAgentResponse:
+            captured_messages.extend(messages)
+            return procurement_agent.ProcurementAgentResponse(
+                response="Your request was rejected by the manager.",
+                draft_po=None,
+            )
+
+    async def _empty_lookup(query: str, *, cost_center_id: str | None = None) -> dict[str, object]:
+        return {"catalog_items": [], "approved_vendors": [], "budget": None}
+
+    monkeypatch.setattr(procurement_agent, "_build_model", lambda: CapturingModel())
+    monkeypatch.setattr(procurement_agent, "retrieve_policy_context", _empty_policy_result)
+    monkeypatch.setattr(procurement_agent, "lookup_procurement_context", _empty_lookup)
+    monkeypatch.setattr(
+        procurement_agent,
+        "get_settings",
+        lambda: SimpleNamespace(hitl_approval_threshold=500),
+    )
+
+    state = {
+        "messages": [
+            HumanMessage(content="Draft an order for two business laptops."),
+            AIMessage(content="Drafted PO."),
+            SystemMessage(content="[HITL MANAGER DECISION: REJECTED] Over budget."),
+        ],
+        "procurement_context": _catalog_context(),
+        "citations": [],
+        "default_cost_center": "CC-IT-01",
+    }
+
+    result = await procurement_agent.procurement_agent_node(state)
+
+    assert captured_messages[0].type == "system"
+    assert all(msg.type != "system" for msg in captured_messages[1:])
+    assert captured_messages[-1].type == "human"
+    assert "[HITL MANAGER DECISION: REJECTED]" in captured_messages[-1].content
+    assert len(result["procurement_context"]["catalog_items"]) == 1

@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import get_settings
@@ -135,6 +135,66 @@ def _build_model() -> Any:
     return get_structured_chat_model(ProcurementAgentResponse)
 
 
+def _merge_catalog_entries(
+    existing: Any,
+    fresh: Any,
+    *,
+    key_field: str,
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    fallback: list[dict[str, Any]] = []
+    for source in (existing, fresh):
+        if not isinstance(source, list):
+            continue
+        for entry in source:
+            if not isinstance(entry, Mapping):
+                continue
+            item = dict(entry)
+            key = item.get(key_field)
+            if isinstance(key, str) and key.strip():
+                merged[key] = item
+            elif item not in fallback:
+                fallback.append(item)
+    return [*merged.values(), *fallback]
+
+
+def _merge_procurement_context(
+    existing: Mapping[str, Any],
+    fresh: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = {**dict(existing), **dict(fresh)}
+    merged["catalog_items"] = _merge_catalog_entries(
+        existing.get("catalog_items"),
+        fresh.get("catalog_items"),
+        key_field="product_id",
+    )
+    merged["approved_vendors"] = _merge_catalog_entries(
+        existing.get("approved_vendors"),
+        fresh.get("approved_vendors"),
+        key_field="vendor_id",
+    )
+    if fresh.get("budget") is None and existing.get("budget") is not None:
+        merged["budget"] = existing.get("budget")
+    return merged
+
+
+def _normalize_model_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Ensure Gemini never sees trailing SystemMessages or ends on an AIMessage."""
+    normalized: list[BaseMessage] = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            text = _content_text(message.content)
+            if text:
+                normalized.append(HumanMessage(content=f"[Workflow Notice]\n{text}"))
+        else:
+            normalized.append(message)
+    if normalized and isinstance(normalized[-1], AIMessage):
+        normalized.append(
+            HumanMessage(content="Please respond to the latest workflow update.")
+        )
+    return normalized
+
+
 async def procurement_agent_node(
     state: ProcurementGraphState,
 ) -> dict[str, Any]:
@@ -156,10 +216,10 @@ async def procurement_agent_node(
     )
     if not isinstance(erp_context, Mapping):
         raise TypeError("The ERP MCP client must return a mapping.")
-    procurement_context = {
-        **dict(existing_procurement_context),
-        **erp_context,
-    }
+    procurement_context = _merge_procurement_context(
+        existing_procurement_context,
+        erp_context,
+    )
     citations = state.get("citations", [])
     if not isinstance(citations, list):
         raise TypeError("Procurement state citations must be a list.")
@@ -186,7 +246,7 @@ async def procurement_agent_node(
         "approval_threshold_usd": get_settings().hitl_approval_threshold,
     }
     system_message = build_cpo_agent_system_message(context)
-    model_messages = [system_message, *messages]
+    model_messages = [system_message, *_normalize_model_messages(messages)]
     model = _build_model()
     model_result = await model.ainvoke(model_messages)
     agent_response = ProcurementAgentResponse.model_validate(model_result)
@@ -206,6 +266,7 @@ async def procurement_agent_node(
     return {
         "messages": [AIMessage(content=response_text)],
         "draft_po": draft_po,
+        "procurement_context": procurement_context,
         "citations": combined_citations,
         "requires_approval": requires_approval,
         "status": "AWAITING_APPROVAL" if requires_approval else "RUNNING",

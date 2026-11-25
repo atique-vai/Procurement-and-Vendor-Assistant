@@ -115,7 +115,10 @@ async def chat(request: Request, payload: ChatRequest) -> ChatResponse:
     try:
         result = await asyncio.wait_for(
             graph.ainvoke(
-                {"messages": [HumanMessage(content=payload.message)]},
+                {
+                    "messages": [HumanMessage(content=payload.message)],
+                    "thread_id": thread_id,
+                },
                 config=config,
             ),
             timeout=_WORKFLOW_TIMEOUT_SECONDS,

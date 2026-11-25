@@ -1,8 +1,9 @@
 """Model construction and primary/fallback routing for chat workloads."""
 
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from langchain_core.runnables import Runnable
+from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 
@@ -22,6 +23,37 @@ def _effective_temperature(model_name: str, temperature: float) -> float:
     return temperature
 
 
+def _structured_output_runnable(
+    model: Any,
+    output_schema: type[BaseModel],
+) -> Runnable:
+    """Bind output_schema with explicit tool_choice for Gemini models where
+    langchain-google-genai's _supports_tool_choice returns False (e.g. Gemini 3/4).
+    """
+    if (
+        hasattr(model, "bind_tools")
+        and hasattr(model, "_supports_tool_choice")
+        and not model._supports_tool_choice
+    ):
+        tool_name = output_schema.__name__
+        parser = PydanticToolsParser(tools=[output_schema], first_tool_only=True)
+
+        def _parse_message(message: Any) -> BaseModel | None:
+            parsed = parser.invoke(message)
+            if parsed is not None:
+                return parsed
+            content = getattr(message, "content", "")
+            text = content.strip() if isinstance(content, str) else ""
+            if text and "response" in output_schema.model_fields:
+                return output_schema(response=text)
+            return None
+
+        return model.bind_tools([output_schema], tool_choice=tool_name) | RunnableLambda(
+            _parse_message
+        )
+    return model.with_structured_output(output_schema)
+
+
 def _create_model(
     model_name: str,
     *,
@@ -37,7 +69,7 @@ def _create_model(
         max_retries=_MODEL_MAX_RETRIES,
     )
     if output_schema is not None:
-        return model.with_structured_output(output_schema)
+        return _structured_output_runnable(model, output_schema)
     return model
 
 

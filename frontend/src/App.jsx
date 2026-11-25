@@ -369,6 +369,19 @@ function App() {
     if (activeView === "approvals") void refreshApprovals();
   }, [activeView, refreshApprovals]);
 
+  useEffect(() => {
+    if (apiStatus === "online") {
+      void refreshApprovals();
+    }
+  }, [apiStatus, refreshApprovals]);
+
+  useEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage?.role === "assistant" && lastMessage.status === "waiting_for_approval") {
+      void refreshApprovals();
+    }
+  }, [messages, refreshApprovals]);
+
   const refreshDefinition = useCallback(async () => {
     setDefinitionLoading(true);
     setDefinitionError("");

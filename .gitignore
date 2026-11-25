@@ -30,6 +30,8 @@ build/
 # Databases and local vector storage
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 *.db
 qdrant_storage/
 

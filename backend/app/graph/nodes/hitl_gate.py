@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -18,8 +19,9 @@ def _upsert_pending_po_in_erp(state: ProcurementGraphState) -> str:
     table with status='PENDING_APPROVAL' so the React.js Manager Dashboard can display it.
     """
     draft_po: Dict[str, Any] = state.get("draft_po") or {}
-    thread_id = state.get("thread_id", "unknown-thread")
-    po_id = draft_po.get("po_id") or f"PO-2026-{abs(hash(thread_id)) % 900 + 100}"
+    thread_id = state.get("thread_id") or "unknown-thread"
+    digest = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:8].upper()
+    po_id = draft_po.get("po_id") or f"PO-2026-{digest}"
 
     conn = sqlite3.connect(settings.erp_db_path())
     try:
